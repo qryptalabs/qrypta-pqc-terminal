@@ -2,12 +2,13 @@ import "dotenv/config";
 import inquirer from "inquirer";
 import ora from "ora";
 import chalk from "chalk";
-import { parseUnits } from "viem";
-import { CHAINS, type ChainKey } from "./chains.js";
+import { formatEther, parseUnits } from "viem";
+import { CHAINS, DEFAULTS, type ChainKey } from "./chains.js";
 import { mustGetEnv, isAddressLike } from "./utils.js";
 import { proveWithService } from "./prove.js";
 import { sendQuantumTransferZK } from "./send.js";
 import { header, card, kvTable, link } from "./ui.js";
+import { neonProgress } from "./progress.js";
 
 function argFlag(name: string) {
   return process.argv.includes(name);
@@ -18,6 +19,20 @@ function argValue(name: string): string | undefined {
   const pref = process.argv.find((x) => x.startsWith(name + "="));
   if (pref) return pref.split("=").slice(1).join("=");
   return undefined;
+}
+
+function getRpc(chain: ChainKey) {
+  const envName = CHAINS[chain].rpcEnv;
+  return (process.env[envName] && process.env[envName]!.trim()) || DEFAULTS.rpc[chain];
+}
+
+function getContract(chain: ChainKey) {
+  const envName = CHAINS[chain].contractEnv;
+  return (process.env[envName] && process.env[envName]!.trim()) || DEFAULTS.contract[chain];
+}
+
+function getProverUrl() {
+  return (process.env.PROVER_URL && process.env.PROVER_URL.trim()) || "http://localhost:8787";
 }
 
 function buildIsoReference(p: {
@@ -37,11 +52,6 @@ function buildIsoReference(p: {
   });
 }
 
-function explorerTx(chain: ChainKey, txHash: string) {
-  if (chain === "bnb") return `https://bscscan.com/tx/${txHash}`;
-  return `https://etherscan.io/tx/${txHash}`;
-}
-
 function printHelp() {
   header();
   card("Commands", [
@@ -49,15 +59,12 @@ function printHelp() {
     chalk.white("npm run pqc -- --help"),
     "",
     chalk.bold("Flags"),
-    chalk.white("--dry-run") + chalk.dim("   (collect inputs, show summary, do not prove/send)"),
-    chalk.white("--fake") + chalk.dim("      (ask prover for fake proof, if your service supports it)"),
-    chalk.white("--chain eth|bnb") + chalk.dim(" (optional preselect chain)"),
-    chalk.white("--recipient 0x..") + chalk.dim(" (optional prefill)"),
-    chalk.white("--amount 1.25") + chalk.dim("  (optional prefill)"),
-    chalk.white("--title \"PQC DEMO #1\"") + chalk.dim(" (optional prefill)"),
+    chalk.white("--dry-run") + chalk.dim("   (inputs + report only, no prove/send)"),
+    chalk.white("--fake") + chalk.dim("      (ask prover for fake proof, if service supports)"),
     "",
-    chalk.bold("Security"),
-    chalk.dim("Use a burner wallet. Never commit .env. Keep your PK private.")
+    chalk.bold("Defaults"),
+    chalk.dim("RPCs are public by default (override via RPC_ETH / RPC_BNB if you want)."),
+    chalk.dim("Contracts can default to QRYPTA deployments (override via QRYP_CONTRACT_*).")
   ]);
 }
 
@@ -72,11 +79,6 @@ async function main() {
 
   header();
 
-  const preChain = (argValue("--chain") as ChainKey | undefined);
-  const preRecipient = argValue("--recipient");
-  const preAmount = argValue("--amount");
-  const preTitle = argValue("--title");
-
   const { chainKey } = await inquirer.prompt<{ chainKey: ChainKey }>([
     {
       type: "list",
@@ -85,77 +87,64 @@ async function main() {
       choices: [
         { name: CHAINS.bnb.label, value: "bnb" },
         { name: CHAINS.eth.label, value: "eth" }
-      ],
-      when: () => !preChain
+      ]
     }
   ]);
 
-  const chain = (preChain ?? chainKey) as ChainKey;
-  const chainCfg = CHAINS[chain];
+  const chainCfg = CHAINS[chainKey];
 
   const { recipient } = await inquirer.prompt<{ recipient: string }>([
     {
       type: "input",
       name: "recipient",
       message: "Recipient address (0x…):",
-      default: preRecipient,
-      validate: (v) => (isAddressLike(v) ? true : "Invalid address"),
-      when: () => !preRecipient
+      validate: (v) => (isAddressLike(v) ? true : "Invalid address")
     }
   ]);
-
-  const rcpt = preRecipient ?? recipient;
 
   const { amountHuman } = await inquirer.prompt<{ amountHuman: string }>([
     {
       type: "input",
       name: "amountHuman",
       message: "Amount (human, e.g. 1.25):",
-      default: preAmount,
       validate: (v) => {
         const x = Number(v);
         return Number.isFinite(x) && x > 0 ? true : "Invalid amount";
-      },
-      when: () => !preAmount
+      }
     }
   ]);
 
-  const amt = preAmount ?? amountHuman;
-
   const { title } = await inquirer.prompt<{ title: string }>([
-    {
-      type: "input",
-      name: "title",
-      message: "ISO Reference title:",
-      default: preTitle ?? "PQC DEMO"
-    }
+    { type: "input", name: "title", message: "ISO Reference title:", default: "PQC DEMO" }
   ]);
 
   const deadlineMinutes = Number(process.env.DEFAULT_DEADLINE_MINUTES || "30");
   const isoReference = buildIsoReference({
     project: "QRYPTA",
     title,
-    chain,
-    recipient: rcpt,
-    amountHuman: amt
+    chain: chainKey,
+    recipient,
+    amountHuman
   });
 
-  // Read env only when needed
-  const rpcUrl = process.env[chainCfg.rpcEnv] || "";
-  const contract = process.env[chainCfg.contractEnv] || "";
-  const proverUrl = process.env.PROVER_URL || "";
-  const hasEnv = Boolean(rpcUrl && contract && proverUrl);
+  const rpcUrl = getRpc(chainKey);
+  const contract = getContract(chainKey);
+  const proverUrl = getProverUrl();
 
-  const amountWei = parseUnits(amt, 18).toString();
+  const amountWei = parseUnits(amountHuman, 18).toString();
 
   card("Step 1/3 — Summary", []);
   kvTable([
     ["Network", chainCfg.label],
-    ["Recipient", rcpt],
-    ["Amount", `${amt} (wei: ${amountWei})`],
+    ["RPC", rpcUrl],
+    ["Contract", contract],
+    ["Contract (Explorer)", DEFAULTS.explorer[chainKey].address(contract)],
+    ["Token (Explorer)", DEFAULTS.explorer[chainKey].token(contract)],
+    ["Recipient", recipient],
+    ["Amount", `${amountHuman} (wei: ${amountWei})`],
     ["Deadline", `~${deadlineMinutes} minutes`],
     ["ISO Ref", isoReference],
-    ["Mode", dryRun ? "DRY-RUN (no prove/send)" : fake ? "FAKE proof (if prover supports)" : "REAL proof"]
+    ["Mode", dryRun ? "DRY-RUN" : fake ? "FAKE proof" : "REAL proof"]
   ]);
 
   if (dryRun) {
@@ -163,80 +152,94 @@ async function main() {
     return;
   }
 
-  if (!hasEnv) {
-    console.log(chalk.red("\nMissing .env config.\n"));
-    console.log(chalk.dim("Required: RPC_*, QRYP_CONTRACT_*, OWNER_PK, PROVER_URL"));
-    console.log(chalk.dim("Tip: cp .env.example .env && edit .env (never commit it)"));
-    process.exit(1);
+  // real sends require OWNER_PK
+  const ownerPk = mustGetEnv("OWNER_PK");
+
+  const { confirm } = await inquirer.prompt<{ confirm: boolean }>([
+    { type: "confirm", name: "confirm", message: "Proceed with REAL send now?", default: false }
+  ]);
+  if (!confirm) {
+    console.log(chalk.yellow("Cancelled."));
+    return;
   }
 
-  // Strict env reads (only now)
-  const rpcUrl2 = mustGetEnv(chainCfg.rpcEnv);
-  const contract2 = mustGetEnv(chainCfg.contractEnv);
-  const ownerPk = mustGetEnv("OWNER_PK");
-  const proverUrl2 = mustGetEnv("PROVER_URL");
-
-  // PROVE
+  // Step 2: proving (neon progress)
   card("Step 2/3 — Proving", [
-    chalk.dim("Calling prover service to generate SP1 proof…"),
-    chalk.dim(`PROVER_URL: ${proverUrl2}`)
+    chalk.dim("Generating SP1 proof via prover service…"),
+    chalk.dim(`PROVER_URL: ${proverUrl}`)
   ]);
 
-  const sp = ora("Generating proof…").start();
-  const proved = await proveWithService(proverUrl2, {
-    chain,
-    recipient: rcpt,
-    amountWei,
-    isoReference,
-    fake,
-    deadlineMinutes
-  }).catch((e) => {
-    sp.fail("Proof generation failed.");
+  const p1 = neonProgress("Proving");
+  let proved: any;
+  try {
+    proved = await proveWithService(proverUrl, {
+      chain: chainKey,
+      recipient,
+      amountWei,
+      isoReference,
+      fake,
+      deadlineMinutes
+    });
+    p1.stopOk("proof ready");
+  } catch (e: any) {
+    p1.stopFail("prover error");
     throw e;
-  });
-  sp.succeed("Proof ready.");
+  }
 
   kvTable([
     ["isoRefHash", proved.isoRefHash ?? "(not provided)"],
-    ["publicValues", `${proved.publicValues.slice(0, 24)}…`],
-    ["proofBytes", `${proved.proofBytes.slice(0, 24)}…`]
+    ["publicValues", `${proved.publicValues.slice(0, 28)}…`],
+    ["proofBytes", `${proved.proofBytes.slice(0, 28)}…`]
   ]);
 
-  // SEND
-  card("Step 3/3 — Broadcast", [
-    chalk.dim("Submitting quantumTransferZK on-chain…"),
-    chalk.dim(`Contract: ${contract2}`)
-  ]);
+  // Step 3: broadcast + confirm (neon progress)
+  card("Step 3/3 — Broadcast", [chalk.dim("Submitting quantumTransferZK and waiting confirmation…")]);
 
-  const ss = ora("Broadcasting tx…").start();
-  const sent = await sendQuantumTransferZK({
-    chain: chainCfg.chain,
-    rpcUrl: rpcUrl2,
-    contract: contract2,
-    ownerPk,
-    recipient: rcpt,
-    amountHuman: amt,
-    publicValues: proved.publicValues,
-    proofBytes: proved.proofBytes,
-    isoReference
-  }).catch((e) => {
-    ss.fail("Transaction failed.");
+  const p2 = neonProgress("Broadcast/Confirm");
+  let sent: any;
+  try {
+    sent = await sendQuantumTransferZK({
+      chain: chainCfg.chain,
+      rpcUrl,
+      contract,
+      ownerPk,
+      recipient,
+      amountHuman,
+      publicValues: proved.publicValues,
+      proofBytes: proved.proofBytes,
+      isoReference
+    });
+    p2.stopOk("confirmed");
+  } catch (e: any) {
+    p2.stopFail("tx failed");
     throw e;
-  });
-  ss.succeed("Confirmed.");
+  }
 
-  const txUrl = explorerTx(chain, String(sent.hash));
+  const txHash = String(sent.hash);
+  const txUrl = DEFAULTS.explorer[chainKey].tx(txHash);
 
+  const gasUsed = sent.receipt.gasUsed ?? 0n;
+  const eff = sent.receipt.effectiveGasPrice ?? 0n;
+  const feeWei = gasUsed * eff;
+
+  // “CertiK-like” receipt report
+  card("On-chain Receipt Report", []);
   kvTable([
-    ["txHash", String(sent.hash)],
+    ["txHash", txHash],
     ["Explorer", txUrl],
     ["status", String(sent.receipt.status)],
     ["block", String(sent.receipt.blockNumber)],
-    ["gasUsed", String(sent.receipt.gasUsed)]
+    ["from", String(sent.receipt.from)],
+    ["to", String(sent.receipt.to)],
+    ["method", "quantumTransferZK(...)"],
+    ["gasUsed", gasUsed.toString()],
+    ["effectiveGasPrice", eff ? `${eff.toString()} wei` : "(n/a)"],
+    ["networkFee", eff ? `${formatEther(feeWei)} ${chainKey === "eth" ? "ETH" : "BNB"}` : "(n/a)"],
+    ["logs", String(sent.receipt.logs?.length ?? 0)]
   ]);
 
   console.log("\n" + chalk.greenBright("Done ✅"));
-  console.log(link("Open", txUrl) + "\n");
+  console.log(link("Open in explorer", txUrl) + "\n");
 }
 
 main().catch((e) => {
