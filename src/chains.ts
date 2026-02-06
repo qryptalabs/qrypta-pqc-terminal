@@ -19,8 +19,6 @@ export const DEFAULTS = {
       token: (a: string) => `https://bscscan.com/token/${a}`
     }
   },
-  // If you want hard defaults to your official deployments:
-  // set them here (can still be overridden by env)
   contract: {
     eth: "0x5266fe1aD9B035d0ED6142f1A70e9D6F102c8153",
     bnb: "0x5266fe1aD9B035d0ED6142f1A70e9D6F102c8153"

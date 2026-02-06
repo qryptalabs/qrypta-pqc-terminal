@@ -21,19 +21,33 @@ function argValue(name: string): string | undefined {
   return undefined;
 }
 
+function cleanEnvValue(v?: string): string | undefined {
+  if (!v) return undefined;
+  const s = v.trim();
+  if (!s) return undefined;
+
+  // ignore template placeholders
+  if (/YOUR_/i.test(s)) return undefined;
+  if (/^0xYour/i.test(s)) return undefined;
+  if (/0x\.\.\./i.test(s)) return undefined;
+
+  return s;
+}
+
 function getRpc(chain: ChainKey) {
   const envName = CHAINS[chain].rpcEnv;
-  return (process.env[envName] && process.env[envName]!.trim()) || DEFAULTS.rpc[chain];
+  return cleanEnvValue(process.env[envName]) ?? DEFAULTS.rpc[chain];
 }
 
 function getContract(chain: ChainKey) {
   const envName = CHAINS[chain].contractEnv;
-  return (process.env[envName] && process.env[envName]!.trim()) || DEFAULTS.contract[chain];
+  return cleanEnvValue(process.env[envName]) ?? DEFAULTS.contract[chain];
 }
 
 function getProverUrl() {
-  return (process.env.PROVER_URL && process.env.PROVER_URL.trim()) || "http://localhost:8787";
+  return cleanEnvValue(process.env.PROVER_URL) ?? "http://localhost:8787";
 }
+
 
 function buildIsoReference(p: {
   project: string;
