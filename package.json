@@ -10,7 +10,9 @@
   "dependencies": {
     "boxen": "^7.1.1",
     "chalk": "^5.4.1",
+    "cli-table3": "^0.6.5",
     "dotenv": "^16.4.5",
+    "figures": "^6.1.0",
     "gradient-string": "^2.0.2",
     "inquirer": "^9.3.7",
     "ora": "^8.0.1",
